@@ -1,0 +1,20 @@
+# Środowisko Python
+.venv/
+.env
+
+# Pliki tymczasowe Python i Jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Dane źródłowe i metadane pobrań
+data/
+
+# Nieukończone pobrania
+*.part
+
+# Pliki systemowe i ustawienia edytorów
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
