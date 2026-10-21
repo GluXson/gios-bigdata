@@ -48,6 +48,13 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def source_folder(source):
+    if "dataset" in source:
+        return source["dataset"]
+
+    return str(source["year"])
+
+
 def load_sources():
     if not CONFIG_PATH.is_file():
         raise FileNotFoundError(
@@ -69,23 +76,49 @@ def load_sources():
     destinations = set()
 
     for source in sources:
-        year = str(source["year"])
-        url = source["url"].strip()
-        filename = source["filename"]
+        validate_source(source)
 
-        if not year.isdigit() or len(year) != 4:
-            raise ValueError(f"Nieprawidłowy rok: {year}")
+        destination = (
+            source_folder(source),
+            source["filename"].casefold(),
+        )
 
-        parsed_url = urlparse(url)
-
-        if (
-            parsed_url.scheme not in {"http", "https"}
-            or not parsed_url.netloc
-        ):
+        if destination in destinations:
             raise ValueError(
-                f"Uzupełnij bezpośredni adres pliku dla roku {year} "
-                "w config/sources.json."
+                "Powtórzony plik docelowy: "
+                f"{destination[0]}/{source['filename']}"
             )
+
+        destinations.add(destination)
+
+    return sources
+
+
+def validate_source(source):
+    folder = source_folder(source)
+    url = source["url"].strip()
+    filename = source["filename"]
+
+    if "dataset" in source:
+        if (
+            not folder
+            or folder.startswith(("/", "\\"))
+            or ".." in folder.replace("\\", "/").split("/")
+        ):
+            raise ValueError(f"Nieprawidłowy dataset: {folder!r}")
+    elif not folder.isdigit() or len(folder) != 4:
+        raise ValueError(f"Nieprawidłowy rok: {folder}")
+
+    parsed_url = urlparse(url)
+
+    if (
+        parsed_url.scheme not in {"http", "https"}
+        or not parsed_url.netloc
+    ):
+        raise ValueError(
+            f"Uzupełnij bezpośredni adres pliku dla {folder} "
+            "w config/sources.json."
+        )
 
         if (
             not isinstance(filename, str)
@@ -97,17 +130,6 @@ def load_sources():
             raise ValueError(
                 f"Nieprawidłowa nazwa pliku: {filename!r}"
             )
-
-        destination = (year, filename.casefold())
-
-        if destination in destinations:
-            raise ValueError(
-                f"Powtórzony plik docelowy: {year}/{filename}"
-            )
-
-        destinations.add(destination)
-
-    return sources
 
 
 def verify_existing_file(target, metadata_path, source_url):
@@ -145,11 +167,13 @@ def verify_existing_file(target, metadata_path, source_url):
 
 
 def import_source(session, source):
-    year = str(source["year"])
+    validate_source(source)
+
+    folder = source_folder(source)
     source_url = source["url"].strip()
     filename = source["filename"]
 
-    target_dir = RAW_DIR / year
+    target_dir = RAW_DIR / folder
     target_dir.mkdir(parents=True, exist_ok=True)
 
     target = target_dir / filename
@@ -209,9 +233,10 @@ def import_source(session, source):
                 )
 
         metadata = {
-            "provider": "GIOŚ",
+            "provider": source.get("provider", "GIOŚ"),
             "layer": "raw",
-            "year": int(year),
+            "dataset": folder,
+            "year": source.get("year"),
             "source_url": source_url,
             "resolved_url": resolved_url,
             "filename": filename,

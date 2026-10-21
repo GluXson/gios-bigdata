@@ -18,14 +18,23 @@ Aktualnie zaimplementowany etap: **RAW**. Biblioteki analityczne będą wykorzys
 ```text
 gios-bigdata/
 ├── config/
-│   └── sources.json              # Adresy źródeł, lata i nazwy plików
+│   └── sources.json              # Adresy plików GIOŚ (pomiary, metadane stacji)
 ├── data/
-│   └── raw/                      # Oryginalne pliki i metadane pobrań
+│   ├── raw/                      # Oryginalne pliki i metadane pobrań
+│   │   ├── 2024/                 #   pomiary GIOŚ (ZIP z XLSX)
+│   │   ├── stacje/               #   metadane stacji GIOŚ (XLSX)
+│   │   └── openmeteo/2024/       #   pogoda Open-Meteo (JSON, jeden na stację)
+│   └── bronze/                   # Tabele Parquet po ujednoliceniu kształtu i typów
 ├── notebooks/
-│   └── 01_raw_import.ipynb        # Notebook tworzony przez generator
+│   ├── 01_raw_import.ipynb       # Pobieranie wszystkich źródeł do RAW
+│   ├── 02_bronze_gios.ipynb      # RAW → bronze: pomiary, stacje, stanowiska
+│   └── 02_bronze_openmeteo.ipynb # RAW → bronze: pogoda
 ├── scripts/
-│   ├── import_raw.py             # Generator notebooka
-│   └── download_raw.py           # Pobieranie danych do RAW
+│   ├── import_raw.py             # Generator notebooka 01 (nieaktualny)
+│   ├── download_raw.py           # Pobieranie plików do RAW
+│   ├── download_openmeteo.py     # Pobieranie pogody dla stacji PM2.5
+│   ├── bronze_gioś.py            # Konwersja GIOŚ do bronze
+│   └── bronze_openmeteo.py       # Konwersja pogody do bronze
 ├── .gitignore
 ├── README.md
 └── requirements.txt
