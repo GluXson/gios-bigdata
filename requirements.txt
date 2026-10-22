@@ -2,8 +2,8 @@ requests>=2.32,<3
 jupyterlab>=4,<5
 ipykernel>=6,<8
 
-duckdb
-polars
-pyarrow
-fastexcel
-scikit-learn
+duckdb>=1.5,<3
+polars>=2,<3
+pyarrow>=26,<27
+fastexcel>=0.21,<1
+scikit-learn>=1.9,<2

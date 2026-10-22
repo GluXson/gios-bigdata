@@ -22,6 +22,8 @@ Potok danych dla pomiarów jakości powietrza GIOŚ z 2024 r. i godzinowej pogod
 | SILVER | Oczyszczone PM2.5 złączone z pogodą, cechy pochodne, partycje | Milestone 2 |
 | GOLD | Próbka cech pod model, trening i ewaluacja | Milestone 3 |
 
+Milestone 1 (profilowanie jakości) działa na warstwie bronze i niczego nie zapisuje: notebook `03_profilowanie.ipynb` zawiera schemat tabel (`DESCRIBE` w DuckDB), profilowanie SQL pomiarów, metadanych i pogody, porównanie źródeł, tabelę zbiorczą anomalii, opis anomalii technicznych i listę TODO dla zespołu.
+
 ## Struktura folderów
 
 ```text
@@ -37,7 +39,8 @@ gios-bigdata/
 ├── notebooks/
 │   ├── 01_raw_import.ipynb       # Pobieranie wszystkich źródeł do RAW
 │   ├── 02_bronze_gios.ipynb      # RAW → bronze: pomiary, stacje, stanowiska
-│   └── 02_bronze_openmeteo.ipynb # RAW → bronze: pogoda
+│   ├── 02_bronze_openmeteo.ipynb # RAW → bronze: pogoda
+│   └── 03_profilowanie.ipynb     # Milestone 1: schemat, profilowanie SQL, anomalie
 ├── scripts/
 │   ├── download_raw.py           # Pobieranie plików do RAW
 │   ├── download_openmeteo.py     # Pobieranie pogody dla stacji PM2.5
@@ -83,5 +86,6 @@ Wykonuj komórki od góry, w tej kolejności:
 1. `01_raw_import.ipynb` — pobiera pomiary i metadane stacji GIOŚ, potem pogodę dla 96 stacji PM2.5 (kilka minut, 2 s przerwy między zapytaniami).
 2. `02_bronze_gios.ipynb` — zapisuje `pomiary_2024.parquet`, `stacje.parquet` i `stanowiska.parquet`.
 3. `02_bronze_openmeteo.ipynb` — zapisuje `openmeteo_2024.parquet`.
+4. `03_profilowanie.ipynb` — profilowanie jakości bronze w DuckDB (potrzebuje plików z kroków 2 i 3).
 
 Ponowne uruchomienie notebooka 01 nie pobiera plików, które już są i mają zgodną sumę SHA-256.
