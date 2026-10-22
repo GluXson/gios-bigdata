@@ -1,3 +1,4 @@
+import json
 import runpy
 import time
 import zipfile
@@ -25,6 +26,7 @@ HOURLY = [
 ]
 
 PAUSE_SECONDS = 2
+ATTEMPTS = 3
 
 download_raw = runpy.run_path(str(Path(__file__).with_name("download_raw.py")))
 
@@ -77,6 +79,62 @@ def build_url(latitude, longitude):
     )
 
 
+def weather_error(path):
+    # Open-Meteo potrafi zwrócić komunikat błędu z kodem 200,
+    # np. "Unexpected error while streaming data: timeoutReached".
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "plik nie jest poprawnym JSON-em"
+
+    hourly = payload.get("hourly") if isinstance(payload, dict) else None
+
+    if not isinstance(hourly, dict):
+        return "brak sekcji 'hourly'"
+
+    missing = [name for name in ["time", *HOURLY] if name not in hourly]
+
+    if missing:
+        return f"brak zmiennych w 'hourly': {missing}"
+
+    lengths = {len(hourly[name]) for name in ["time", *HOURLY]}
+
+    if len(lengths) != 1 or 0 in lengths:
+        return "puste albo nierównej długości listy w 'hourly'"
+
+    return None
+
+
+def import_weather(session, source):
+    target = RAW_DIR / DATASET / source["filename"]
+    metadata_path = target.with_name(target.name + ".metadata.json")
+
+    for attempt in range(1, ATTEMPTS + 1):
+        already_downloaded = target.exists()
+        metadata = download_raw["import_source"](session, source)
+        error = weather_error(target)
+
+        if not already_downloaded:
+            time.sleep(PAUSE_SECONDS)
+
+        if error is None:
+            return metadata
+
+        download_raw["logger"].warning(
+            "Niepoprawna odpowiedź Open-Meteo (%s): %s — usuwam, próba %d/%d",
+            source["filename"],
+            error,
+            attempt,
+            ATTEMPTS,
+        )
+        target.unlink()
+        metadata_path.unlink(missing_ok=True)
+
+    raise RuntimeError(
+        f"Nie udało się pobrać poprawnej pogody: {source['filename']}"
+    )
+
+
 def main():
     coordinates = station_coordinates(pm25_station_codes())
     results = []
@@ -89,16 +147,8 @@ def main():
                 "url": build_url(row["szerokosc"], row["dlugosc"]),
                 "filename": f"{row['kod_stacji']}.json",
             }
-            already_downloaded = (
-                RAW_DIR / DATASET / source["filename"]
-            ).exists()
 
-            results.append(
-                download_raw["import_source"](session, source)
-            )
-
-            if not already_downloaded:
-                time.sleep(PAUSE_SECONDS)
+            results.append(import_weather(session, source))
 
     print(f"Stacje z pogodą: {len(results)}")
 

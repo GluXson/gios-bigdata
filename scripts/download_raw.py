@@ -120,16 +120,16 @@ def validate_source(source):
             "w config/sources.json."
         )
 
-        if (
-            not isinstance(filename, str)
-            or not filename
-            or filename in {".", ".."}
-            or any(char in filename for char in '<>:"/\\|?*')
-            or filename.endswith((" ", "."))
-        ):
-            raise ValueError(
-                f"Nieprawidłowa nazwa pliku: {filename!r}"
-            )
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename in {".", ".."}
+        or any(char in filename for char in '<>:"/\\|?*')
+        or filename.endswith((" ", "."))
+    ):
+        raise ValueError(
+            f"Nieprawidłowa nazwa pliku: {filename!r}"
+        )
 
 
 def verify_existing_file(target, metadata_path, source_url):
