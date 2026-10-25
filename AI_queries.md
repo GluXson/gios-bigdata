@@ -4,7 +4,9 @@
 
 ### Krystian Głuszko
 
--
+- Czy zamiast PM2.5 lepiej przewidywać arsen i rtęć (albo inny bardzo szkodliwy i powszechny wskaźnik), ile danych mają te wskaźniki i czy model może przewidywać dwie zmienne naraz? AI porównało wskaźniki w bronze (arsen skupiony przy hutach, rtęć na 5 stacjach, benzo(a)piren na 174 stacjach).
+- Co to jest próg wykrywalności i czy wartości 0.5 (As) i 0.05 (BaP) to na pewno wartości poniżej progu? AI sprawdziło wytyczne EEA i flagi walidacji w danych EEA dla polskich stacji (flaga 3: połowa progu wykrywalności) oraz wykryło próbki tygodniowe BaP.
+- Czy przewidywanie BaP jest zgodne z kryteriami własnego zbioru, skoro to średnia tygodniowa? Wynik: za mało wierszy pod model (około 9 tys. pomiarów), zostajemy przy PM2.5; przy okazji dopisana anomalia 8.17 (kod stacji ze spacją).
 
 ### Wiktor Kozikowski
 
