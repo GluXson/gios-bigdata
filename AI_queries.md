@@ -7,7 +7,7 @@
 -
 
 ### Wiktor Kozikowski
-
+- pokaż i opisz mi jak może wyglądać przykładowy loader dla danych pogodowych open meteo 
 - Czy dane GIOŚ wystarczą do modelu prognozującego PM2.5 na podstawie pogody? Czego brakuje i skąd to pobrać?
 - Czy dane Open-Meteo były przeliczane na godziny lub inną strefę czasową?
 - Sprawdź w dokumentacji Open-Meteo, jak wybierana jest komórka siatki i skąd stały kierunek wiatru przy ciszy.
