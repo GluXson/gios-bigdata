@@ -10,11 +10,12 @@ BRONZE_DIR = ROOT / "data" / "bronze"
 SILVER_DIR = ROOT / "data" / "silver"
 
 # Dni ustawowo wolne w 2024 r. (Wigilia jest wolna dopiero od 2025 r.).
-HOLIDAYS_2024 = [
+HOLIDAYS = [
     date(2024, 1, 1), date(2024, 1, 6), date(2024, 3, 31), date(2024, 4, 1),
     date(2024, 5, 1), date(2024, 5, 3), date(2024, 5, 19), date(2024, 5, 30),
     date(2024, 8, 15), date(2024, 11, 1), date(2024, 11, 11),
     date(2024, 12, 25), date(2024, 12, 26),
+    date(2025, 1, 1),  # Ostatnia godzina 2024 UTC to już Nowy Rok w Polsce.
 ]
 
 PM25_LAGS = [1, 2, 3, 24, 168]
@@ -45,8 +46,8 @@ def build_base(measurements, weather, stations):
     return (
         weather
         .drop("plik_zrodlowy")
-        .join(pm25, on=["kod_stacji", "data_czas_utc"], how="left")
-        .join(stations, on="kod_stacji", how="left")
+        .join(pm25, on=["kod_stacji", "data_czas_utc"], how="left", validate="1:1")
+        .join(stations, on="kod_stacji", how="left", validate="m:1")
         .sort("kod_stacji", "data_czas_utc")
     )
 
@@ -57,7 +58,7 @@ def calendar_features():
     hour = local.dt.hour()
     month = local.dt.month()
     weekday = local.dt.weekday()
-    holiday = local.dt.date().is_in(HOLIDAYS_2024)
+    holiday = local.dt.date().is_in(HOLIDAYS)
 
     return [
         hour.alias("godzina"),
@@ -108,7 +109,27 @@ def weather_features():
     ]
 
 
+def validate_base(base):
+    """Pełna siatka UTC przed shift/rolling; NULL celu pozostają w tabeli."""
+    keys = ["kod_stacji", "data_czas_utc"]
+    if base.is_empty() or any(base[c].null_count() for c in keys):
+        raise ValueError("Pusta siatka lub NULL w kluczu stacja-czas UTC")
+    if base.select(pl.struct(keys).is_duplicated().any()).item():
+        raise ValueError("Duplikat stacji i czasu UTC")
+    if base.select((pl.col("data_czas_utc").diff().over("kod_stacji") != pl.duration(hours=1)).any()).item():
+        raise ValueError("Nieciągła lub nieposortowana siatka godzin UTC")
+    if any(base[c].null_count() for c in ["typ_stacji", "typ_obszaru"]):
+        raise ValueError("Brak metadanych stacji")
+    spans = base.group_by("kod_stacji").agg(
+        pl.col("data_czas_utc").min().alias("start"),
+        pl.col("data_czas_utc").max().alias("end"),
+    )
+    if spans["start"].n_unique() != 1 or spans["end"].n_unique() != 1:
+        raise ValueError("Stacje mają różne zakresy siatki godzin")
+
+
 def add_features(base):
+    validate_base(base)
     return base.with_columns(*calendar_features(), *pm25_features(), *weather_features())
 
 

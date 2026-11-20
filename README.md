@@ -19,7 +19,7 @@ Potok danych dla pomiarów jakości powietrza GIOŚ z 2024 r. i godzinowej pogod
 |---|---|---|
 | RAW | Oryginalne pliki GIOŚ i Open-Meteo z metadanymi pobrania (URL, data, rozmiar, SHA-256) | gotowe |
 | BRONZE | Te same dane w Parquet: format długi (1 wiersz = 1 pomiar), ujednolicone nazwy i typy, bez czyszczenia | gotowe |
-| SILVER | Oczyszczone pomiary wszystkich wskaźników i pogoda z czasem w UTC; potem PM2.5 złączone z pogodą, cechy pochodne, partycje | Milestone 2: czyszczenie i cechy gotowe |
+| SILVER | Oczyszczone pomiary wszystkich wskaźników i pogoda z czasem w UTC; potem PM2.5 złączone z pogodą, cechy pochodne, partycje | Milestone 2: czyszczenie → cechy → partycjonowanie i benchmark |
 | GOLD | Próbka cech pod model, trening i ewaluacja | Milestone 3 |
 
 Milestone 1 (profilowanie jakości) działa na warstwie bronze i niczego nie zapisuje: notebook `03_profilowanie.ipynb` zawiera schemat tabel (`DESCRIBE` w DuckDB), profilowanie SQL pomiarów, metadanych i pogody, porównanie źródeł, tabelę zbiorczą anomalii, opis anomalii technicznych i listę TODO dla zespołu.
@@ -43,14 +43,16 @@ gios-bigdata/
 │   ├── 02_bronze_openmeteo.ipynb # RAW → bronze: pogoda
 │   ├── 03_profilowanie.ipynb     # Milestone 1: schemat, profilowanie SQL, anomalie
 │   ├── 04_silver.ipynb           # Milestone 2: czyszczenie bronze → silver
-│   └── 05_inz_cech.ipynb         # Milestone 2: złączenie PM2.5 z pogodą i cechy
+│   ├── 05_inz_cech.ipynb         # Milestone 2: złączenie PM2.5 z pogodą i cechy
+│   └── 06_partycjonowanie_benchmark.ipynb # Milestone 2: zapis pełnej tabeli cech i test A/B
 ├── scripts/
 │   ├── download_raw.py           # Pobieranie plików do RAW
 │   ├── download_openmeteo.py     # Pobieranie pogody dla stacji PM2.5
 │   ├── bronze_gios.py            # Konwersja GIOŚ do bronze
 │   ├── bronze_openmeteo.py       # Konwersja pogody do bronze
 │   ├── silver_clean.py           # Reguły czyszczenia bronze → silver
-│   └── silver_features.py        # Złączenie PM2.5 z pogodą i cechy pochodne
+│   ├── silver_features.py        # Złączenie PM2.5 z pogodą i cechy pochodne
+│   └── partition_benchmark.py    # Partycje po stacji, kontrola wszystkich cech i benchmark
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -95,4 +97,37 @@ Wykonuj komórki od góry, w tej kolejności:
 5. `04_silver.ipynb` — usuwa anomalie z bronze, dodaje czas UTC i zapisuje `data/silver/pomiary_2024.parquet` oraz `data/silver/openmeteo_2024.parquet`.
 6. `05_inz_cech.ipynb` — łączy PM2.5 z pogodą (pełna siatka godzin), liczy cechy kalendarzowe, historię PM2.5, wiatr u/v, sumy opadu i stopniodni grzania, zapisuje `data/silver/pm25_pogoda_2024.parquet`.
 
+7. `06_partycjonowanie_benchmark.ipynb` — zapisuje wszystkie kolumny z kroku 6 jako płaski Parquet oraz partycje po `kod_stacji` (Snappy), porównuje komplet danych, mierzy zapytania i publikuje partycje dla M3.
+
 Ponowne uruchomienie notebooka 01 nie pobiera plików, które już są i mają zgodną sumę SHA-256.
+
+## Ciągłość silver → gold
+
+`04_silver` zapisuje oczyszczone pomiary i pogodę. Wyłącznie `05_inz_cech` tworzy `pm25_pogoda_2024.parquet`: 40 kolumn na pełnej siatce stacja–godzina UTC. `06_partycjonowanie_benchmark` zachowuje wszystkie cechy i NULL-e. Kontrola źródło → A → B obejmuje typy, unikalność `(kod_stacji, data_czas_utc)` i dokładną zgodność wszystkich wartości przez `EXCEPT ALL` w obie strony.
+
+Partycjonujemy po `kod_stacji`, ponieważ analizy historii konkretnej lokalizacji mogą pominąć inne stacje. Tabela cech obejmuje wyłącznie PM2.5, więc dawny klucz `wskaznik` nie jest użyteczny. Obecnie powstaje 96 partycji po 8784 godziny. Nie wymagamy, by każda cecha uczestniczyła w każdym zapytaniu benchmarku; wszystkie pozostają w obu zapisach.
+
+Warianty eksperymentu są w `data/benchmark/<seria>/`, a raporty, SQL, plany, pomiary i PNG w `reports/partition_benchmark/<seria>/`. Benchmark wyłącza statystyki grup wierszy w obu zapisach, aby badać pruning plików. Ze statystykami płaski plik posortowany po stacji również może pomijać grupy; wyniki eksperymentu nie dowodzą przewagi nad takim zapisem. Oba warianty mają Snappy i ten sam limit wielkości grup; raport podaje rzeczywistą liczbę grup i rozmiar. Mierzymy rozgrzany cache, nie sam transfer dyskowy.
+
+Po udanej walidacji publikowana jest kopia partycji pod stałą ścieżką `data/silver/pm25_pogoda_2024_partycje/`. Poprzedni wynik pozostaje w `data/benchmark/<seria>/previous_published/`. Publikacja wykorzystuje katalog tymczasowy i zmianę nazwy; nie należy równolegle uruchamiać dwóch publikacji ani czytać katalogu w trakcie podmiany.
+
+Odczyt dla Milestone 3, z katalogu projektu:
+
+```sql
+SELECT *
+FROM read_parquet(
+    'data/silver/pm25_pogoda_2024_partycje/**/*.parquet',
+    hive_partitioning=true,
+    hive_types={'kod_stacji': 'VARCHAR'}
+);
+```
+
+`kod_stacji` jest odtwarzane z nazwy katalogu. W gold wybieramy horyzont i cechy, odrzucamy brak zmiennej docelowej i ustalamy obsługę braków cech. Nie przeliczamy lagów po próbkowaniu ani usunięciu godzin. Dla prognozy 24 h wykluczamy lagi 1–3 h i okna PM2.5 kończące się na t−1. Pogoda pochodzi z reanalizy, więc nie jest rzeczywistą prognozą dostępną w chwili predykcji. Podział czasowy ogranicza ryzyko zawyżania wyników przez losowe mieszanie sąsiednich godzin. Próbkowanie reservoir z całego zbioru nie korzysta z pruning według stacji.
+
+Godzina kalendarzowa jest lokalna (Europe/Warsaw); przy zmianie czasu może zniknąć lub wystąpić dwukrotnie. Kluczem pozostaje czas UTC. Flagi świąt obejmują też 1 stycznia 2025, ponieważ ostatnia godzina 2024 UTC należy już lokalnie do Nowego Roku.
+
+Testy regresji bez instalowania zależności:
+
+```bat
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```

@@ -2,7 +2,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 from time import perf_counter_ns
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 import csv
 import json
 import math
@@ -10,6 +10,8 @@ import os
 import platform
 import random
 import statistics
+import shutil
+from tempfile import TemporaryDirectory
 import duckdb
 import pyarrow as pa
 import pyarrow.dataset as ds
@@ -31,13 +33,21 @@ def save_csv(path, rows):
             writer.writerows(rows)
 
 
+def package_version(name):
+    # Wykresy są osobnym krokiem; zapis i kontrola danych działają bez matplotlib.
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
 def create_context(root=ROOT, repeats=20, warmups=3, threads=None, write_statistics=False):
     if repeats < 2 or warmups < 0:
         raise ValueError('Wymagane repeats >= 2, warmups >= 0')
     root = Path(root).resolve()
-    source = root / 'data/silver/pomiary_2024.parquet'
+    source = root / 'data/silver/pm25_pogoda_2024.parquet'
     if not source.is_file():
-        raise FileNotFoundError(f'Najpierw wykonaj 04_silver.ipynb: {source}')
+        raise FileNotFoundError(f'Najpierw wykonaj 05_inz_cech.ipynb: {source}')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
     data = root / 'data/benchmark' / stamp
     report = root / 'reports/partition_benchmark' / stamp
@@ -59,7 +69,7 @@ def create_context(root=ROOT, repeats=20, warmups=3, threads=None, write_statist
                     threads=threads, repeats=repeats, warmups=warmups, seed=42,
                     compression='snappy', write_statistics=bool(write_statistics),
                     row_group_size_limit=122880, cache='warm OS cache; OS cache not cleared',
-                    versions={p:version(p) for p in ['duckdb','pyarrow','polars','matplotlib']})
+                    versions={p:package_version(p) for p in ['duckdb','pyarrow','polars','matplotlib']})
     (report/'environment.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
     return ctx
 
@@ -68,10 +78,10 @@ def write_variants(ctx):
     if ctx['flat'].exists() or ctx['partitioned'].exists():
         raise FileExistsError('Warianty istnieja. Utworz nowy kontekst.')
     source = ds.dataset(ctx['source'],format='parquet')
-    missing = {'wskaznik','wartosc','data_czas_utc','czas_usredniania'}-set(source.schema.names)
+    missing = {'kod_stacji','data_czas_utc','pm25','godzina','temperature_2m','pm25_lag24'}-set(source.schema.names)
     if missing:
         raise ValueError(f'Brak kolumn: {missing}')
-    if source.count_rows(filter=ds.field('wskaznik').is_null()):
+    if source.count_rows(filter=ds.field('kod_stacji').is_null()):
         raise ValueError('NULL w kluczu partycji')
     n=ctx['row_group_size']
     with pq.ParquetWriter(ctx['flat'],source.schema,compression='snappy',
@@ -81,11 +91,11 @@ def write_variants(ctx):
     fmt=ds.ParquetFileFormat()
     options=fmt.make_write_options(compression='snappy',write_statistics=ctx['write_statistics'])
     ds.write_dataset(source,base_dir=str(ctx['partitioned']),format=fmt,file_options=options,
-        partitioning=ds.partitioning(pa.schema([source.schema.field('wskaznik')]),flavor='hive'),
+        partitioning=ds.partitioning(pa.schema([source.schema.field('kod_stacji')]),flavor='hive'),
         max_rows_per_group=n,max_rows_per_file=n*8,preserve_order=True)
     ctx['readers']={
         'A':f"read_parquet({literal(ctx['flat'].as_posix())}, hive_partitioning=false)",
-        'B':f"read_parquet({literal((ctx['partitioned']/'**'/'*.parquet').as_posix())}, hive_partitioning=true)"}
+        'B':f"read_parquet({literal((ctx['partitioned']/'**'/'*.parquet').as_posix())}, hive_partitioning=true, hive_types={{'kod_stacji': 'VARCHAR'}})"}
     return inspect_storage(ctx)
 
 
@@ -130,72 +140,107 @@ def assert_same(a,b):
 
 
 def verify_data(ctx):
-    con=ctx['con']
-    schemas={}
-    for v,reader in ctx['readers'].items():
-        schemas[v]={r[0]:r[1] for r in con.execute(f'DESCRIBE SELECT * FROM {reader}').fetchall()}
-    if schemas['A']!=schemas['B']:
-        raise AssertionError('Rozne schematy')
-    sql="""SELECT wskaznik,czas_usredniania,hour(data_czas_utc),
-        count(*),count(wartosc),sum(wartosc),avg(wartosc)
-        FROM {reader} GROUP BY 1,2,3 ORDER BY 1,2,3"""
-    a=con.execute(sql.format(reader=ctx['readers']['A'])).fetchall()
-    b=con.execute(sql.format(reader=ctx['readers']['B'])).fetchall()
-    assert_same(a,b)
-    counts=[pq.ParquetFile(ctx['source']).metadata.num_rows,
-            pq.ParquetFile(ctx['flat']).metadata.num_rows,
-            sum(pq.ParquetFile(p).metadata.num_rows for p in ctx['partitioned'].rglob('*.parquet'))]
-    if len(set(counts))!=1:
+    """Dokładna zgodność wszystkich wartości (w tym NULL) źródła, A i B."""
+    con = ctx['con']
+    readers = {'source': f"read_parquet({literal(ctx['source'].as_posix())}, hive_partitioning=false)",
+               **ctx['readers']}
+    schemas = {v: {row[0]: row[1] for row in con.execute(f'DESCRIBE SELECT * FROM {reader}').fetchall()}
+               for v, reader in readers.items()}
+    if not (schemas['source'] == schemas['A'] == schemas['B']):
+        raise AssertionError('Rozne schematy źródła, A i B')
+    columns = ', '.join('"' + c.replace('"', '""') + '"' for c in schemas['source'])
+    counts = {}
+    for v, reader in readers.items():
+        counts[v] = con.execute(f'SELECT count(*) FROM {reader}').fetchone()[0]
+        invalid = con.execute(f"""SELECT count(*) FROM (
+            SELECT kod_stacji, data_czas_utc FROM {reader}
+            GROUP BY 1,2 HAVING count(*) != 1 OR kod_stacji IS NULL OR data_czas_utc IS NULL
+        )""").fetchone()[0]
+        if invalid:
+            raise AssertionError(f'Nieprawidłowy klucz stacja-czas UTC: {v}')
+    for left, right in [('source', 'A'), ('A', 'B')]:
+        for a, b in [(left, right), (right, left)]:
+            different = con.execute(f"""SELECT count(*) FROM (
+                SELECT {columns} FROM {readers[a]}
+                EXCEPT ALL SELECT {columns} FROM {readers[b]}
+            )""").fetchone()[0]
+            if different:
+                raise AssertionError(f'Rozne dane {a} -> {b}: {different} wierszy')
+    if len(set(counts.values())) != 1:
         raise AssertionError('Rozna liczebnosc')
-    return dict(status='OK',source_rows=counts[0],A_rows=counts[1],B_rows=counts[2],checked_groups=len(a))
+    result = dict(status='OK', source_rows=counts['source'], A_rows=counts['A'],
+                  B_rows=counts['B'], checked_columns=len(schemas['source']))
+    (ctx['report']/'validation.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+    return result
 
 
-def query(reader,key):
-    predicate='' if key is None else f' AND wskaznik={literal(key)}'
-    return f"""SELECT wskaznik,hour(data_czas_utc) AS godzina_utc,
-        avg(wartosc) AS srednie_stezenie,count(*) AS liczba_pomiarow
-        FROM {reader} WHERE czas_usredniania='1g' {predicate}
-        GROUP BY 1,2 ORDER BY 1,2"""
+def query(reader, stations):
+    predicate = '' if stations is None else ' WHERE kod_stacji IN (' + ','.join(map(literal, stations)) + ')'
+    return f"""SELECT godzina, avg(pm25) AS srednie_pm25,
+        avg(temperature_2m) AS srednia_temperatura, avg(pm25_lag24) AS srednie_pm25_lag24,
+        count(*) AS liczba_godzin, count(pm25) AS liczba_pomiarow
+        FROM {reader}{predicate} GROUP BY godzina ORDER BY godzina"""
 
 
-def prepare_scenarios(ctx,indicators=None):
-    counts=ctx['con'].execute(f"""SELECT wskaznik,count(*) FROM {ctx['readers']['A']}
-        WHERE czas_usredniania='1g' GROUP BY 1 ORDER BY count(*) DESC,wskaznik""").fetchall()
-    if not counts:
-        raise ValueError('Brak danych godzinowych')
-    available=dict(counts)
-    if indicators is None:
-        indices=sorted({0,len(counts)//3,2*len(counts)//3,len(counts)-1})
-        selected=[counts[i][0] for i in indices]
-        if 'PM2.5' in available and 'PM2.5' not in selected:
-            selected[-1]='PM2.5'
-    else:
-        selected=list(indicators)
-    selected=list(dict.fromkeys(selected))
-    if not selected or set(selected)-set(available):
-        raise ValueError(f'Nieprawidlowa lista wskaznikow: {selected}')
-    total=sum(available.values())
-    scenarios=[dict(id=f'q{i:02}',scenario=f'wskaznik={k}',indicator=k,
-                    hourly_rows=available[k],hourly_share_pct=100*available[k]/total)
-               for i,k in enumerate(selected,1)]
-    scenarios.append(dict(id='control',scenario='kontrola_bez_filtra',indicator=None,
-                          hourly_rows=total,hourly_share_pct=100.0))
-    ctx['scenarios']=scenarios
-    ctx['queries']={}
+def prepare_scenarios(ctx):
+    stations = [r[0] for r in ctx['con'].execute(
+        f"SELECT DISTINCT kod_stacji FROM {ctx['readers']['A']} ORDER BY kod_stacji").fetchall()]
+    if not stations:
+        raise ValueError('Brak stacji')
+    random.Random(42).shuffle(stations)
+    sizes = sorted({min(n, len(stations)) for n in [1, 8, 32]})
+    scenarios = [dict(id=f'q{i:02}', scenario=f'{n}_stacji', stations=stations[:n],
+                      selected_stations=n, total_stations=len(stations))
+                 for i, n in enumerate(sizes, 1)]
+    scenarios.append(dict(id='control', scenario='wszystkie_stacje', stations=None,
+                          selected_stations=len(stations), total_stations=len(stations)))
+    ctx['scenarios'] = scenarios
+    ctx['queries'] = {}
     for item in scenarios:
-        results={}
-        for v,reader in ctx['readers'].items():
-            q=query(reader,item['indicator'])
-            ctx['queries'][item['id'],v]=q
-            results[v]=ctx['con'].execute(q).fetchall()
-            (ctx['report']/f"{item['id']}_{v}.sql").write_text(q,encoding='utf-8')
-            plan=ctx['con'].execute('EXPLAIN ANALYZE '+q).fetchall()
-            (ctx['report']/f"plan_{item['id']}_{v}.txt").write_text('\n'.join(str(r[-1]) for r in plan),encoding='utf-8')
-        assert_same(results['A'],results['B'])
-        columns=['wskaznik','godzina_utc','srednie_stezenie','liczba_pomiarow']
-        save_csv(ctx['report']/f"aggregation_{item['id']}.csv",[dict(zip(columns,r)) for r in results['A']])
-    save_csv(ctx['report']/'scenarios.csv',scenarios)
+        results = {}
+        for v, reader in ctx['readers'].items():
+            q = query(reader, item['stations'])
+            ctx['queries'][item['id'], v] = q
+            results[v] = ctx['con'].execute(q).fetchall()
+            (ctx['report']/f"{item['id']}_{v}.sql").write_text(q, encoding='utf-8')
+            plan = ctx['con'].execute('EXPLAIN ANALYZE '+q).fetchall()
+            (ctx['report']/f"plan_{item['id']}_{v}.txt").write_text(
+                '\n'.join(str(r[-1]) for r in plan), encoding='utf-8')
+        assert_same(results['A'], results['B'])
+        columns = ['godzina', 'srednie_pm25', 'srednia_temperatura', 'srednie_pm25_lag24',
+                   'liczba_godzin', 'liczba_pomiarow']
+        save_csv(ctx['report']/f"aggregation_{item['id']}.csv",
+                 [dict(zip(columns, r)) for r in results['A']])
+    save_csv(ctx['report']/'scenarios.csv', scenarios)
     return pl.DataFrame(scenarios)
+
+
+def publish_dataset(ctx):
+    """Publikuje zweryfikowaną kopię B; poprzedni wynik zachowuje w katalogu tej serii."""
+    target = ctx['root']/'data/silver/pm25_pogoda_2024_partycje'
+    previous = ctx['data']/'previous_published'
+    # Wszystkie operacje przenoszenia pozostają wewnątrz katalogu danych projektu.
+    for path in [target, previous]:
+        if not path.resolve().is_relative_to((ctx['root']/'data').resolve()):
+            raise ValueError('Ścieżka publikacji poza katalogiem danych')
+    with TemporaryDirectory(dir=target.parent, prefix=target.name + '.tmp-') as temporary:
+        temporary = Path(temporary).resolve()
+        if not temporary.is_relative_to(target.parent.resolve()):
+            raise ValueError('Katalog tymczasowy poza katalogiem silver')
+        staging = temporary/'partitioned'
+        shutil.copytree(ctx['partitioned'], staging)
+        reader = f"read_parquet({literal((staging/'**'/'*.parquet').as_posix())}, hive_partitioning=true, hive_types={{'kod_stacji': 'VARCHAR'}})"
+        verify_data({**ctx, 'readers': {**ctx['readers'], 'B': reader}})
+        if target.exists():
+            target.rename(previous)
+        try:
+            staging.rename(target)
+        except OSError:
+            if previous.exists() and not target.exists():
+                previous.rename(target)
+            raise
+    (ctx['report']/'published_path.txt').write_text(str(target), encoding='utf-8')
+    return target
 
 
 def run_benchmark(ctx):
@@ -302,6 +347,7 @@ def main():
         for fig in figures:
             plt.close(fig)
         print(summary)
+        print('Dane dla M3:', publish_dataset(ctx))
         print('Raport:',ctx['report'])
         return ctx['report']
     finally:
