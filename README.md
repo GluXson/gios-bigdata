@@ -19,7 +19,7 @@ Potok danych dla pomiarów jakości powietrza GIOŚ z 2024 r. i godzinowej pogod
 |---|---|---|
 | RAW | Oryginalne pliki GIOŚ i Open-Meteo z metadanymi pobrania (URL, data, rozmiar, SHA-256) | gotowe |
 | BRONZE | Te same dane w Parquet: format długi (1 wiersz = 1 pomiar), ujednolicone nazwy i typy, bez czyszczenia | gotowe |
-| SILVER | Oczyszczone pomiary wszystkich wskaźników i pogoda z czasem w UTC; potem PM2.5 złączone z pogodą, cechy pochodne, partycje | Milestone 2: czyszczenie gotowe |
+| SILVER | Oczyszczone pomiary wszystkich wskaźników i pogoda z czasem w UTC; potem PM2.5 złączone z pogodą, cechy pochodne, partycje | Milestone 2: czyszczenie i cechy gotowe |
 | GOLD | Próbka cech pod model, trening i ewaluacja | Milestone 3 |
 
 Milestone 1 (profilowanie jakości) działa na warstwie bronze i niczego nie zapisuje: notebook `03_profilowanie.ipynb` zawiera schemat tabel (`DESCRIBE` w DuckDB), profilowanie SQL pomiarów, metadanych i pogody, porównanie źródeł, tabelę zbiorczą anomalii, opis anomalii technicznych i listę TODO dla zespołu.
@@ -36,19 +36,21 @@ gios-bigdata/
 │   │   ├── stacje/               #   metadane stacji GIOŚ (XLSX)
 │   │   └── openmeteo/2024/       #   pogoda Open-Meteo (JSON, jeden na stację)
 │   ├── bronze/                   # pomiary_2024, stacje, stanowiska, openmeteo_2024 (Parquet)
-│   └── silver/                   # oczyszczone pomiary_2024 i openmeteo_2024 (Parquet)
+│   └── silver/                   # oczyszczone pomiary_2024, openmeteo_2024 i cechy pm25_pogoda_2024 (Parquet)
 ├── notebooks/
 │   ├── 01_raw_import.ipynb       # Pobieranie wszystkich źródeł do RAW
 │   ├── 02_bronze_gios.ipynb      # RAW → bronze: pomiary, stacje, stanowiska
 │   ├── 02_bronze_openmeteo.ipynb # RAW → bronze: pogoda
 │   ├── 03_profilowanie.ipynb     # Milestone 1: schemat, profilowanie SQL, anomalie
-│   └── 04_silver.ipynb           # Milestone 2: czyszczenie bronze → silver
+│   ├── 04_silver.ipynb           # Milestone 2: czyszczenie bronze → silver
+│   └── 05_inz_cech.ipynb         # Milestone 2: złączenie PM2.5 z pogodą i cechy
 ├── scripts/
 │   ├── download_raw.py           # Pobieranie plików do RAW
 │   ├── download_openmeteo.py     # Pobieranie pogody dla stacji PM2.5
 │   ├── bronze_gios.py            # Konwersja GIOŚ do bronze
 │   ├── bronze_openmeteo.py       # Konwersja pogody do bronze
-│   └── silver_clean.py           # Reguły czyszczenia bronze → silver
+│   ├── silver_clean.py           # Reguły czyszczenia bronze → silver
+│   └── silver_features.py        # Złączenie PM2.5 z pogodą i cechy pochodne
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -91,5 +93,6 @@ Wykonuj komórki od góry, w tej kolejności:
 3. `02_bronze_openmeteo.ipynb` — zapisuje `openmeteo_2024.parquet`.
 4. `03_profilowanie.ipynb` — profilowanie jakości bronze w DuckDB (potrzebuje plików z kroków 2 i 3).
 5. `04_silver.ipynb` — usuwa anomalie z bronze, dodaje czas UTC i zapisuje `data/silver/pomiary_2024.parquet` oraz `data/silver/openmeteo_2024.parquet`.
+6. `05_inz_cech.ipynb` — łączy PM2.5 z pogodą (pełna siatka godzin), liczy cechy kalendarzowe, historię PM2.5, wiatr u/v, sumy opadu i stopniodni grzania, zapisuje `data/silver/pm25_pogoda_2024.parquet`.
 
 Ponowne uruchomienie notebooka 01 nie pobiera plików, które już są i mają zgodną sumę SHA-256.

@@ -31,8 +31,10 @@
 
 ### Wiktor Kozikowski
 
--
-
+- Jak sprawdzić, czy złączenie nie zduplikowało wierszy?
+- Co oznacza, że GIOŚ znakuje koniec godziny, a Open-Meteo początek? Jak to wpływa na złączenie?
+- Co to jest data leakage? Podaj trzy przykłady wycieku w prognozowaniu szeregów czasowych.
+- Dlaczego kierunek wiatru rozkłada się na u i v? Czemu sam kąt jest złą cechą?
 ### Jakub Glugla
 
 -
