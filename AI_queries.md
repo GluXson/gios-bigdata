@@ -8,13 +8,13 @@
 - Co to jest próg wykrywalności i czy wartości 0.5 (As) i 0.05 (BaP) to na pewno wartości poniżej progu? AI sprawdziło wytyczne EEA i flagi walidacji w danych EEA dla polskich stacji (flaga 3: połowa progu wykrywalności) oraz wykryło próbki tygodniowe BaP.
 - Czy przewidywanie BaP jest zgodne z kryteriami własnego zbioru, skoro to średnia tygodniowa? Wynik: za mało wierszy pod model (około 9 tys. pomiarów), zostajemy przy PM2.5; przy okazji dopisana anomalia 8.17 (kod stacji ze spacją).
 
-
 ### Wiktor Kozikowski
-- pokaż i opisz mi jak może wyglądać przykładowy loader dla danych pogodowych open meteo 
+
+- pokaż i opisz mi jak może wyglądać przykładowy loader dla danych pogodowych open meteo
 - Czy dane GIOŚ wystarczą do modelu prognozującego PM2.5 na podstawie pogody? Czego brakuje i skąd to pobrać?
 - Czy dane Open-Meteo były przeliczane na godziny lub inną strefę czasową?
 - Sprawdź w dokumentacji Open-Meteo, jak wybierana jest komórka siatki i skąd stały kierunek wiatru przy ciszy.
-- pytam AI o informacje na temat wykrytych anomali i wyszukajnie przydanych informacji które mogły by wytłumaczyć ldaczego występują 
+- pytam AI o informacje na temat wykrytych anomali i wyszukajnie przydanych informacji które mogły by wytłumaczyć ldaczego występują
 
 ### Jakub Glugla
 
@@ -35,9 +35,12 @@
 - Co oznacza, że GIOŚ znakuje koniec godziny, a Open-Meteo początek? Jak to wpływa na złączenie?
 - Co to jest data leakage? Podaj trzy przykłady wycieku w prognozowaniu szeregów czasowych.
 - Dlaczego kierunek wiatru rozkłada się na u i v? Czemu sam kąt jest złą cechą?
+
 ### Jakub Glugla
 
--
+- napisanie elementu auto wnioskowania wyników (poprawiano partycjonowanie i jeśli wynik by sie drametrialnie zmienił to żeby nie przepisywać wniosków)
+- formatowanie wykresów testu partycjonowania
+- weryfikacja logiki testu i partycjonowania
 
 ## Milestone 3
 
