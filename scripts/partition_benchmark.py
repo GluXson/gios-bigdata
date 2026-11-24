@@ -128,9 +128,75 @@ def parquet_reader(path, partition_key=None, files=None):
             f"hive_types={{{literal(partition_key)}: {literal(sql_type)}}})")
 
 
+
+def build_scaled_source(con, source, data_dir, factor, row_group_size):
+    """Synthetic volume test: fixed stations, disjoint time blocks, no SILVER writes."""
+    factor = checked_int(factor, "scale_factor", 1)
+    reader = parquet_reader(source)
+    schema = con.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()
+    types = {r[0]: r[1] for r in schema}
+    if not {"kod_stacji", "data_czas_utc"}.issubset(types):
+        raise ValueError("Brak klucza stacja-czas")
+    if not types["data_czas_utc"].startswith("TIMESTAMP"):
+        raise TypeError("data_czas_utc musi byc timestamp")
+    n, stations, low, high = con.execute(
+        f"SELECT count(*), count(DISTINCT kod_stacji), min(data_czas_utc), "
+        f"max(data_czas_utc) FROM {reader}"
+    ).fetchone()
+    if not n or low is None or high is None:
+        raise ValueError("Puste dane lub brak czasu")
+    invalid = con.execute(f"""SELECT count(*) FROM (
+        SELECT kod_stacji, data_czas_utc FROM {reader} GROUP BY 1,2
+        HAVING count(*) <> 1 OR kod_stacji IS NULL OR data_czas_utc IS NULL
+    ) t""").fetchone()[0]
+    if invalid:
+        raise ValueError("Niepoprawny lub powtorzony klucz zrodla")
+    info = dict(scale_factor=factor, original_source=str(source), original_rows=n,
+                expected_rows=n * factor, stations=stations, synthetic=factor > 1,
+                method="Fixed stations; disjoint shifted UTC blocks; all other columns copied",
+                limitation="Volume benchmark only, not training data; calendar and lag features not recalculated")
+    if factor == 1:
+        info.update(source=str(source), actual_rows=n, shift_days=0)
+        return info
+    step = (high - low).days + 1
+    target = Path(data_dir) / f"synthetic_source_x{factor}.parquet"
+    if target.exists():
+        raise FileExistsError(target)
+    time_type = types["data_czas_utc"]
+    selects = []
+    for i in range(factor):
+        selects.append(
+            f"SELECT * REPLACE (CAST(data_czas_utc + INTERVAL '{i * step} days' "
+            f"AS {time_type}) AS data_czas_utc) FROM {reader}"
+        )
+    union = " UNION ALL ".join(selects)
+    con.execute(f"COPY ({union}) TO {literal(target.as_posix())} "
+                f"(FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE {row_group_size})")
+    result = parquet_reader(target)
+    actual_schema = con.execute(f"DESCRIBE SELECT * FROM {result}").fetchall()
+    if [(r[0], r[1]) for r in schema] != [(r[0], r[1]) for r in actual_schema]:
+        raise AssertionError("Skalowanie zmienilo schemat logiczny")
+    actual, actual_stations = con.execute(
+        f"SELECT count(*), count(DISTINCT kod_stacji) FROM {result}"
+    ).fetchone()
+    if actual != n * factor or actual_stations != stations:
+        raise AssertionError("Niepoprawna liczba wierszy lub stacji po skalowaniu")
+    invalid = con.execute(f"""SELECT count(*) FROM (
+        SELECT kod_stacji, data_czas_utc FROM {result} GROUP BY 1,2
+        HAVING count(*) <> 1 OR kod_stacji IS NULL OR data_czas_utc IS NULL
+    ) t""").fetchone()[0]
+    if invalid:
+        raise AssertionError("Skalowanie naruszylo unikalnosc klucza")
+    info.update(source=str(target), actual_rows=actual, shift_days=step,
+                bytes=target.stat().st_size)
+    return info
+
+
 def create_context(root=ROOT, repeats=20, warmups=3, threads=None,
                    write_statistics=False, row_group_size=122880, seed=42,
-                   group_count=8, reader_mode="all_files_list", small_difference_percent=5.0):
+                   group_count=8, reader_mode="all_files_list", small_difference_percent=5.0,
+                   source_path=None, scale_factor=1, scenario_sizes=(1, 8, 32),
+                   memory_limit=None, run_label="benchmark"): 
     repeats = checked_int(repeats, "repeats", 2)
     warmups = checked_int(warmups, "warmups", 0)
     threads = checked_int(min(4, os.cpu_count() or 1) if threads is None else threads, "threads", 1)
@@ -146,16 +212,32 @@ def create_context(root=ROOT, repeats=20, warmups=3, threads=None,
     if not math.isfinite(small_difference_percent) or small_difference_percent < 0:
         raise ValueError("Nieprawidlowy prog malej roznicy")
     root = Path(root).resolve()
-    source = root / "data/silver/pm25_pogoda_2024.parquet"
+    source = root / "data/silver/pm25_pogoda_2024.parquet" if source_path is None else Path(source_path)
+    if not source.is_absolute():
+        source = root / source
+    source = source.resolve()
+    scale_factor = checked_int(scale_factor, "scale_factor", 1)
+    scenario_sizes = sorted({checked_int(n, "scenario_size", 1) for n in scenario_sizes})
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_label):
+        raise ValueError("run_label: uzyj liter ASCII, cyfr, _ lub -")
     if not source.is_file():
         raise FileNotFoundError(f"Najpierw utworz tabele cech w notebooku 05: {source}")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ") + "_" + uuid4().hex[:8]
+    stamp = f"{run_label}_x{scale_factor}_{stamp}"
     data, report = root / "data/benchmark" / stamp, root / "reports/partition_benchmark" / stamp
     con = duckdb.connect()
     try:
         con.execute(f"SET threads = {threads}")
+        if memory_limit is not None:
+            con.execute("SET memory_limit = " + literal(memory_limit))
         data.mkdir(parents=True, exist_ok=False)
         report.mkdir(parents=True, exist_ok=False)
+        original_source = source
+        original_fingerprint = fingerprint(source)
+        scaling = build_scaled_source(con, source, data, scale_factor, row_group_size)
+        source = Path(scaling["source"])
+        if fingerprint(original_source) != original_fingerprint:
+            raise RuntimeError("Oryginal zmienil sie podczas skalowania")
         ctx = dict(root=root, source=source, flat=data / "A_flat.parquet",
                    grouped=data / "B_grouped", partitioned=data / "C_by_station",
                    data=data, report=report, repeats=repeats, warmups=warmups,
@@ -163,8 +245,15 @@ def create_context(root=ROOT, repeats=20, warmups=3, threads=None,
                    group_count=group_count, reader_mode=reader_mode,
                    write_statistics=write_statistics, con=con,
                    small_difference_percent=float(small_difference_percent),
-                   source_fingerprint=fingerprint(source))
+                   source_fingerprint=fingerprint(source), scale_factor=scale_factor,
+                   original_source=original_source, scenario_sizes=scenario_sizes,
+                   scaling=scaling)
+        save_json(report / "scaling.json", scaling)
         save_json(report / "environment.json", {
+            "scale_factor": scale_factor, "scenario_sizes": scenario_sizes,
+            "memory_limit": memory_limit, "run_label": run_label,
+            "original_source": str(original_source),
+            "original_source_fingerprint": original_fingerprint,
             "created_utc": stamp, "source": str(source), "source_fingerprint": ctx["source_fingerprint"],
             "python": platform.python_version(), "platform": platform.platform(),
             "logical_cpus": os.cpu_count(), "threads": threads, "repeats": repeats,
@@ -403,7 +492,7 @@ def prepare_scenarios(ctx):
     stations = sorted(ctx["station_groups"])
     random.Random(ctx["seed"]).shuffle(stations)
     # Kazdy wybor jest rzeczywistym podzbiorem. Pelny zbior jest osobna kontrola.
-    sizes = sorted({n for n in [1, 8, 32] if n < len(stations)})
+    sizes = sorted({n for n in ctx["scenario_sizes"] if n < len(stations)})
     if not sizes and len(stations) > 1:
         sizes = [1]
     scenarios = [dict(id=f"q{i:02}", scenario=f"{n}_stacji", stations=stations[:n],
@@ -687,33 +776,60 @@ def describe_results(ctx, summary, storage):
     return text
 
 
-def main():
-    ctx = create_context(group_count=8)
+def run_experiment(**settings):
+    """Run one experiment and always close its DuckDB connection."""
+    ctx = create_context(**settings)
     try:
         storage = write_variants(ctx)
-        print(storage["tree"])
-        print(verify_data(ctx))
-        print(prepare_scenarios(ctx))
+        verify_data(ctx)
+        prepare_scenarios(ctx)
         timings = run_benchmark(ctx)
         summary = summarize(ctx, timings)
-        print(summary)
         try:
             figures = make_plots(ctx, timings, summary)
         except ModuleNotFoundError as exc:
             if exc.name != "matplotlib":
                 raise
-            print("Brak matplotlib: pomiary i CSV zapisane, wykresy pominiete")
         else:
             import matplotlib.pyplot as plt
-            for figure in figures:
-                plt.close(figure)
-        print(describe_results(ctx, summary, storage))
-        print("Raport:", ctx["report"])
-        return ctx["report"]
+            for fig in figures:
+                plt.close(fig)
+        describe_results(ctx, summary, storage)
+        return dict(report=ctx["report"], data=ctx["data"],
+                    scale_factor=ctx["scale_factor"], scaling=ctx["scaling"],
+                    summary=summary, storage=storage["storage"])
     finally:
         ctx["con"].close()
 
 
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="A/B/C partition benchmark")
+    parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--source", type=Path, default=None)
+    parser.add_argument("--scale", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=20)
+    parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--groups", type=int, default=8)
+    parser.add_argument("--row-group-size", type=int, default=122880)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--scenario-sizes", type=int, nargs="+", default=[1, 8, 32])
+    parser.add_argument("--reader-mode", choices=["all_files_list", "glob"], default="all_files_list")
+    parser.add_argument("--write-statistics", action="store_true")
+    parser.add_argument("--memory-limit", default=None)
+    parser.add_argument("--small-difference-percent", type=float, default=5.0)
+    parser.add_argument("--label", default="benchmark")
+    args = parser.parse_args()
+    result = run_experiment(root=args.root, source_path=args.source, scale_factor=args.scale,
+        repeats=args.repeats, warmups=args.warmups, threads=args.threads, group_count=args.groups,
+        row_group_size=args.row_group_size, seed=args.seed, scenario_sizes=args.scenario_sizes,
+        reader_mode=args.reader_mode, write_statistics=args.write_statistics,
+        memory_limit=args.memory_limit, small_difference_percent=args.small_difference_percent,
+        run_label=args.label)
+    print(result["summary"])
+    print("Raport:", result["report"])
+
+
 if __name__ == "__main__":
     main()
-
