@@ -8,3 +8,4 @@ polars>=2,<3
 pyarrow>=26,<27
 fastexcel>=0.21,<1
 scikit-learn>=1.9,<2
+pandas>=3.1,<4
