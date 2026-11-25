@@ -1,133 +1,79 @@
 # GIOŚ — projekt Big Data
 
-Potok danych dla pomiarów jakości powietrza GIOŚ z 2024 r. i godzinowej pogody z Open-Meteo. Cel: model przewidujący godzinowe stężenie PM2.5 na podstawie pogody.
-
-## Stack technologiczny
-
-- Python — język projektu.
-- JupyterLab / Jupyter Notebook — uruchamianie i dokumentowanie potoku danych.
-- Requests — pobieranie plików źródłowych.
-- DuckDB — analizy SQL.
-- Polars — przetwarzanie i transformacje danych.
-- PyArrow — obsługa formatu Parquet.
-- Scikit-learn — przygotowanie i ocena modeli predykcyjnych.
-- venv — izolowane środowisko Python.
-
-## Etapy
-
-| Warstwa | Zawartość | Stan |
-|---|---|---|
-| RAW | Oryginalne pliki GIOŚ i Open-Meteo z metadanymi pobrania (URL, data, rozmiar, SHA-256) | gotowe |
-| BRONZE | Te same dane w Parquet: format długi (1 wiersz = 1 pomiar), ujednolicone nazwy i typy, bez czyszczenia | gotowe |
-| SILVER | Oczyszczone pomiary wszystkich wskaźników i pogoda z czasem w UTC; potem PM2.5 złączone z pogodą, cechy pochodne, partycje | Milestone 2: czyszczenie → cechy → partycjonowanie i benchmark |
-| GOLD | Próbka cech pod model, trening i ewaluacja | Milestone 3 |
-
-Milestone 1 (profilowanie jakości) działa na warstwie bronze i niczego nie zapisuje: notebook `03_profilowanie.ipynb` zawiera schemat tabel (`DESCRIBE` w DuckDB), profilowanie SQL pomiarów, metadanych i pogody, porównanie źródeł, tabelę zbiorczą anomalii, opis anomalii technicznych i listę TODO dla zespołu.
-
-## Struktura folderów
-
-```text
-gios-bigdata/
-├── config/
-│   └── sources.json              # Adresy plików GIOŚ (pomiary, metadane stacji)
-├── data/                         # Nie jest w repozytorium — powstaje po uruchomieniu notebooków
-│   ├── raw/                      # Oryginalne pliki i metadane pobrań
-│   │   ├── 2024/                 #   pomiary GIOŚ (ZIP z XLSX)
-│   │   ├── stacje/               #   metadane stacji GIOŚ (XLSX)
-│   │   └── openmeteo/2024/       #   pogoda Open-Meteo (JSON, jeden na stację)
-│   ├── bronze/                   # pomiary_2024, stacje, stanowiska, openmeteo_2024 (Parquet)
-│   └── silver/                   # oczyszczone pomiary_2024, openmeteo_2024 i cechy pm25_pogoda_2024 (Parquet)
-├── notebooks/
-│   ├── 01_raw_import.ipynb       # Pobieranie wszystkich źródeł do RAW
-│   ├── 02_bronze_gios.ipynb      # RAW → bronze: pomiary, stacje, stanowiska
-│   ├── 02_bronze_openmeteo.ipynb # RAW → bronze: pogoda
-│   ├── 03_profilowanie.ipynb     # Milestone 1: schemat, profilowanie SQL, anomalie
-│   ├── 04_silver.ipynb           # Milestone 2: czyszczenie bronze → silver
-│   ├── 05_inz_cech.ipynb         # Milestone 2: złączenie PM2.5 z pogodą i cechy
-│   └── 06_partycjonowanie_benchmark.ipynb # Milestone 2: zapis pełnej tabeli cech i test A/B
-├── scripts/
-│   ├── download_raw.py           # Pobieranie plików do RAW
-│   ├── download_openmeteo.py     # Pobieranie pogody dla stacji PM2.5
-│   ├── bronze_gios.py            # Konwersja GIOŚ do bronze
-│   ├── bronze_openmeteo.py       # Konwersja pogody do bronze
-│   ├── silver_clean.py           # Reguły czyszczenia bronze → silver
-│   ├── silver_features.py        # Złączenie PM2.5 z pogodą i cechy pochodne
-│   └── partition_benchmark.py    # Partycje po stacji, kontrola wszystkich cech i benchmark
-├── .gitignore
-├── README.md
-└── requirements.txt
-```
+Potok pomiarów jakości powietrza GIOŚ i godzinowej pogody Open-Meteo dla **2023–2025**. Cel: analiza i model godzinowego PM2.5. Zasady projektu: prostota, intuicyjność, KISS/YAGNI i jawne reguły przetwarzania.
 
 ## Uruchomienie
 
-Polecenia dla Windows CMD, wykonywane z katalogu projektu.
+Korzystaj z istniejącego środowiska `.venv` i jego kernela w Jupyter. Notebooki nie instalują bibliotek. Zależności są w `requirements.txt`; ich instalację lub zmianę wykonuj we własnym terminalu.
 
-### 1. Utworzenie środowiska i instalacja zależności
-
-```bat
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-### 2. Rejestracja kernela Jupyter
-
-```bat
-.venv\Scripts\python.exe -m ipykernel install --user --name gios-bigdata --display-name "Python (GIOS Big Data)"
-```
-
-W notebookach wybieraj kernel `Python (GIOS Big Data)`. Domyślny kernel `Python 3` może uruchomić systemowy Python zamiast `.venv`.
-
-### 3. Źródła danych
-
-Adresy plików GIOŚ są w `config/sources.json`. Wpisy z polem `year` trafiają do `data/raw/<rok>/`, a wpisy z polem `dataset` do `data/raw/<dataset>/`. Adresy pogody Open-Meteo skrypt buduje sam ze współrzędnych stacji.
-
-### 4. Uruchomienie notebooków
-
-```bat
+```powershell
 .venv\Scripts\python.exe -m jupyterlab
 ```
 
-Wykonuj komórki od góry, w tej kolejności:
+Wykonuj notebooki w kolejności:
 
-1. `01_raw_import.ipynb` — pobiera pomiary i metadane stacji GIOŚ, potem pogodę dla 96 stacji PM2.5 (kilka minut, 2 s przerwy między zapytaniami).
-2. `02_bronze_gios.ipynb` — zapisuje `pomiary_2024.parquet`, `stacje.parquet` i `stanowiska.parquet`.
-3. `02_bronze_openmeteo.ipynb` — zapisuje `openmeteo_2024.parquet`.
-4. `03_profilowanie.ipynb` — profilowanie jakości bronze w DuckDB (potrzebuje plików z kroków 2 i 3).
-5. `04_silver.ipynb` — usuwa anomalie z bronze, dodaje czas UTC i zapisuje `data/silver/pomiary_2024.parquet` oraz `data/silver/openmeteo_2024.parquet`.
-6. `05_inz_cech.ipynb` — łączy PM2.5 z pogodą (pełna siatka godzin), liczy cechy kalendarzowe, historię PM2.5, wiatr u/v, sumy opadu i stopniodni grzania, zapisuje `data/silver/pm25_pogoda_2024.parquet`.
+1. `01_raw_import.ipynb` — pobiera archiwa GIOŚ i pogodę.
+2. `02_bronze_gios.ipynb` — konwertuje wszystkie roczniki do Parquet.
+3. `03_bronze_openmeteo.ipynb` — konwertuje pogodę.
+4. `04_profilowanie.ipynb` — profiluje cały zakres w DuckDB. Zachowane opisy historycznych obserwacji 2024 są oznaczone, a aktualne wyniki pochodzą z zapytań.
+5. `05_silver.ipynb` — czyści pomiary i pogodę.
+6. `06_inz_cech.ipynb` — łączy dane i liczy cechy ciągle przez trzy lata; zapisuje też pokrycie i wycinek dla benchmarku.
+7. `07_partycjonowanie_benchmark.ipynb` — niezależny eksperyment na wycinku 2024.
 
-7. `06_partycjonowanie_benchmark.ipynb` — zapisuje wszystkie kolumny z kroku 6 jako płaski Parquet oraz partycje po `kod_stacji` (Snappy), porównuje komplet danych, mierzy zapytania i publikuje partycje dla M3.
+Sam potok bez profilowania i benchmarku można wykonać z katalogu projektu:
 
-Ponowne uruchomienie notebooka 01 nie pobiera plików, które już są i mają zgodną sumę SHA-256.
-
-## Ciągłość silver → gold
-
-`04_silver` zapisuje oczyszczone pomiary i pogodę. Wyłącznie `05_inz_cech` tworzy `pm25_pogoda_2024.parquet`: 40 kolumn na pełnej siatce stacja–godzina UTC. `06_partycjonowanie_benchmark` zachowuje wszystkie cechy i NULL-e. Kontrola źródło → A → B obejmuje typy, unikalność `(kod_stacji, data_czas_utc)` i dokładną zgodność wszystkich wartości przez `EXCEPT ALL` w obie strony.
-
-Partycjonujemy po `kod_stacji`, ponieważ analizy historii konkretnej lokalizacji mogą pominąć inne stacje. Tabela cech obejmuje wyłącznie PM2.5, więc dawny klucz `wskaznik` nie jest użyteczny. Obecnie powstaje 96 partycji po 8784 godziny. Nie wymagamy, by każda cecha uczestniczyła w każdym zapytaniu benchmarku; wszystkie pozostają w obu zapisach.
-
-Warianty eksperymentu są w `data/benchmark/<seria>/`, a raporty, SQL, plany, pomiary i PNG w `reports/partition_benchmark/<seria>/`. Benchmark wyłącza statystyki grup wierszy w obu zapisach, aby badać pruning plików. Ze statystykami płaski plik posortowany po stacji również może pomijać grupy; wyniki eksperymentu nie dowodzą przewagi nad takim zapisem. Oba warianty mają Snappy i ten sam limit wielkości grup; raport podaje rzeczywistą liczbę grup i rozmiar. Mierzymy rozgrzany cache, nie sam transfer dyskowy.
-
-Po udanej walidacji publikowana jest kopia partycji pod stałą ścieżką `data/silver/pm25_pogoda_2024_partycje/`. Poprzedni wynik pozostaje w `data/benchmark/<seria>/previous_published/`. Publikacja wykorzystuje katalog tymczasowy i zmianę nazwy; nie należy równolegle uruchamiać dwóch publikacji ani czytać katalogu w trakcie podmiany.
-
-Odczyt dla Milestone 3, z katalogu projektu:
-
-```sql
-SELECT *
-FROM read_parquet(
-    'data/silver/pm25_pogoda_2024_partycje/**/*.parquet',
-    hive_partitioning=true,
-    hive_types={'kod_stacji': 'VARCHAR'}
-);
+```powershell
+.venv\Scripts\python.exe -m scripts.download_raw
+.venv\Scripts\python.exe -m scripts.download_openmeteo
+.venv\Scripts\python.exe -m scripts.bronze_gios
+.venv\Scripts\python.exe -m scripts.bronze_openmeteo
+.venv\Scripts\python.exe -m scripts.silver_clean
+.venv\Scripts\python.exe -m scripts.silver_features
 ```
 
-`kod_stacji` jest odtwarzane z nazwy katalogu. W gold wybieramy horyzont i cechy, odrzucamy brak zmiennej docelowej i ustalamy obsługę braków cech. Nie przeliczamy lagów po próbkowaniu ani usunięciu godzin. Dla prognozy 24 h wykluczamy lagi 1–3 h i okna PM2.5 kończące się na t−1. Pogoda pochodzi z reanalizy, więc nie jest rzeczywistą prognozą dostępną w chwili predykcji. Podział czasowy ogranicza ryzyko zawyżania wyników przez losowe mieszanie sąsiednich godzin. Próbkowanie reservoir z całego zbioru nie korzysta z pruning według stacji.
+Testy bez instalowania zależności:
 
-Godzina kalendarzowa jest lokalna (Europe/Warsaw); przy zmianie czasu może zniknąć lub wystąpić dwukrotnie. Kluczem pozostaje czas UTC. Flagi świąt obejmują też 1 stycznia 2025, ponieważ ostatnia godzina 2024 UTC należy już lokalnie do Nowego Roku.
-
-Testy regresji bez instalowania zależności:
-
-```bat
+```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+## Konfiguracja i pliki
+
+`config/sources.json` jest jedyną listą lat i adresów archiwów. `scripts/pipeline_config.py` wylicza zakres i wspólne ścieżki oraz zawiera jawne korekty kodów stacji i uzupełnienie metadanych. Kalendarz świąt w `silver_features.py` obejmuje zakres projektu 2023–2025 oraz lokalny Nowy Rok 2026; rozszerzenie projektu poza ten zakres wymaga jego aktualizacji.
+
+| Warstwa | Pliki |
+|---|---|
+| RAW | `data/raw/<rok>/pomiary_<rok>.zip`, `data/raw/stacje/metadane_stacji.xlsx`, `data/raw/openmeteo/<rok>/<stacja>.json` |
+| BRONZE | `data/bronze/pomiary_2023_2025.parquet`, `openmeteo_2023_2025.parquet`, `stacje.parquet`, `stanowiska.parquet`; pomocniczo roczne Parquet pomiarów |
+| SILVER | `data/silver/pomiary_2023_2025.parquet`, `openmeteo_2023_2025.parquet`, `pm25_pogoda_2023_2025.parquet` |
+| Pokrycie | `data/silver/pokrycie_2023_2025.csv`: stacja, rok UTC, godziny siatki, dostępne oczyszczone pomiary PM2.5 i procent pokrycia |
+| Benchmark | `data/silver/pm25_pogoda_2024.parquet` — wycinek gotowych cech z pełnego zakresu |
+
+Pliki danych są poza Gitem. Pobieranie zachowuje oryginały z URL, datą pobrania, rozmiarem i SHA-256. Poprawne istniejące pliki są wykorzystywane ponownie. Pogoda jest sprawdzana również pod kątem pełnej, uporządkowanej siatki godzin roku, w tym 29 lutego.
+
+## Jawne reguły i ograniczenia
+
+- Zbiór stacji jest sumą stacji PM2.5 ze wszystkich roczników, nie częścią wspólną. Dla każdej lokalizacji pobieramy pełną pogodę 2023–2025. Pogoda sprzed uruchomienia stacji jest reanalizą dla lokalizacji, nie pomiarem działającej stacji.
+- Brak PM2.5 pozostaje NULL, również gdy stacja nie występuje w całym roczniku. Raport pokrycia nie utożsamia braku pomiaru z zerowym stężeniem.
+- Kluczem cech jest `(kod_stacji, data_czas_utc)`. Pełna siatka zawiera 26 304 godziny na stację. Lagi i okna przechodzą przez granice lat; braki godzin nie są skracane.
+- GIOŚ jest w CET, a projekt interpretuje znacznik godzinowy jako koniec okresu: przesunięcie −2 h daje początek godziny UTC. Założenie o końcu okresu wynika z danych. Pierwsza godzina GIOŚ 2023 trafia do 2022-12-31 23:00 UTC i pozostaje poza siatką analizy. Nie pobieramy 2026, więc końcówka 2025 UTC może nie mieć pomiaru PM2.5.
+- Bronze zachowuje ułamki sekund. Godzinowe arkusze 2025 mają narastający dryf poniżej minuty (do około 44 s). Silver wyrównuje je do początku godziny przed czyszczeniem i złączeniem. Przesunięcie obejmujące minuty zatrzymuje przetwarzanie zamiast cicho poprawiać dane.
+- Import obsługuje dodatkowy wiersz nagłówka NO2 2023. Depozycja jest pomijana we wszystkich latach ze względu na inny format i wielkość fizyczną.
+- Kody `SlGoczaUzdro` i `SlRaciborzWP` są łączone z odpowiednikami `MOB` ze słownika; dotychczasowe korekty Brzegu i Szczecina pozostają. Stacja `DsDusznSportMOB` ma osobne uzupełnienie współrzędnych i typów z [karty GIOŚ](https://powietrze.gios.gov.pl/pjp/current/station_details/info/10093); nie utożsamiamy jej ze starszą `DsDusznikMOB`. Uzupełnienie jest stosowane jawnie przy pobieraniu pogody i budowaniu cech, bez zmiany surowego XLSX.
+- Metadane są jednym snapshotem, nie historycznym słownikiem dla każdego roku. Zmiany lokalizacji i typu stacji wymagają osobnej oceny.
+- Czyszczenie zachowuje reguły projektu: brak pomiaru, duplikat, wartości ujemne, zero pyłu, stałe PM2.5 przez co najmniej 12 godzin i izolowane skoki ponad 50. Luka czasowa przerywa ciąg; filtr może usuwać również rzeczywiste epizody.
+- Kalendarz jest lokalny (Europe/Warsaw), oś czasu UTC. [Wigilia jest świętem od 2025](https://www.pip.gov.pl/dla-pracodawcow/pytania-i-odpowiedzi/wigilia-dniem-wolnym-od-pracy).
+
+## Benchmark
+
+Benchmark pozostaje niezależny od analizy trzech lat. Czyta wycinek 2024, przygotowany **po** obliczeniu cech z historią grudnia 2023. Wycinek obejmuje sumę stacji z projektu, także z brakującymi pomiarami w 2024. Skalowanie ×1 i ×10 kopiuje rekordy pod nowymi identyfikatorami stacji; nie dodaje lat ani nowych wartości. Zwiększenie liczby stacji nie jest równoważne wydłużeniu ich historii.
+
+Porównuje A: płaski Parquet, B: K grup stacji, C: 3K grup stacji. Warianty mają wspólny writer PyArrow, kompresję Snappy i ustawienia grup wierszy. Mierzy DuckDB `execute + fetchall`, bez przygotowania danych; cache systemu nie jest czyszczony. Tryb `quick` sprawdza schemat i liczby wierszy, `full` również zgodność wszystkich wartości i kluczy. Wyniki zapytań A/B/C są porównywane poza pomiarem czasu.
+
+Dane eksperymentu i cache trafiają do `data/benchmark/` i `data/benchmark_cache/`, raporty do `reports/partition_benchmark/`. Benchmark nie publikuje danych dla dalszej analizy. Stare katalogi partycji 2024 nie są źródłem dla gold.
+
+## Dalsza analiza i model
+
+Czytaj `data/silver/pm25_pogoda_2023_2025.parquet`. Nie przeliczaj lagów po usunięciu braków lub próbkowaniu. W gold wybierz horyzont i cechy, obsługę braków oraz podział czasowy. Dla prognozy 24 h wyklucz lagi 1–3 h i okna kończące się na t−1. Pogoda jest reanalizą, nie prognozą dostępną w chwili predykcji.
+
+Źródła: [GIOŚ — Bank danych pomiarowych](https://powietrze.gios.gov.pl/pjp/archives), [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api), licencja pogody CC BY 4.0.
