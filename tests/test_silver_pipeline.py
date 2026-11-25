@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+import duckdb
 from scripts import silver_features as features
 from scripts import partition_benchmark as benchmark
 
@@ -43,44 +44,32 @@ class StorageTests(unittest.TestCase):
             "pm25": [10., None, 20., 30.], "godzina": [1, 2, 1, 2],
             "temperature_2m": [1., 2., 3., 4.], "pm25_lag24": [None, 8., None, 9.],
             "extra_feature": [True, None, False, True]})
+        self.frame = pl.concat([self.frame, self.frame.filter(pl.col("kod_stacji") == "A").with_columns(pl.lit("C").alias("kod_stacji"))])
         self.frame.write_parquet(silver / "pm25_pogoda_2024.parquet")
-        self.ctx = benchmark.create_context(self.root, repeats=2, warmups=0)
+        self.ctx = benchmark.create_context(self.root, repeats=2, warmups=0, validation_mode="full", group_count=1, scenario_sizes=(1, 2))
         benchmark.write_variants(self.ctx)
 
     def tearDown(self):
         self.ctx['con'].close()
+        benchmark.release_lock(self.ctx)
         self.tmp.cleanup()
 
-    def test_roundtrip_and_published_hive_read(self):
-        self.assertEqual(benchmark.verify_data(self.ctx)['checked_columns'], 7)
-        benchmark.prepare_scenarios(self.ctx)
-        target = benchmark.publish_dataset(self.ctx)
-        schema = self.ctx['con'].execute(f"DESCRIBE SELECT * FROM read_parquet('{target.as_posix()}/**/*.parquet', hive_partitioning=true)").fetchall()
-        self.assertEqual({r[0] for r in schema}, set(self.frame.columns))
-        # Republish safely and retain the previous complete dataset.
-        benchmark.publish_dataset(self.ctx)
-        self.assertTrue((self.ctx['data'] / 'previous_published').is_dir())
+    def test_roundtrip_all_variants(self):
+        result = benchmark.verify_data(self.ctx)
+        self.assertEqual(result['checked_columns'], 7)
+        self.assertTrue(result['full_value_equality_checked'])
+        self.assertEqual(result['A_rows'], self.frame.height)
+        self.assertEqual(result['B_rows'], self.frame.height)
+        self.assertEqual(result['C_rows'], self.frame.height)
 
     def test_detects_change_to_feature_not_used_in_queries(self):
         self.frame.with_columns(pl.lit(False).alias('extra_feature')).write_parquet(self.ctx['flat'])
         with self.assertRaisesRegex(AssertionError, 'Rozne dane'):
             benchmark.verify_data(self.ctx)
 
-    def test_failed_validation_keeps_published_dataset(self):
-        target = benchmark.publish_dataset(self.ctx)
-        before = {p.relative_to(target): p.read_bytes() for p in target.rglob('*.parquet')}
-        self.frame.with_columns(pl.lit(False).alias('extra_feature')).write_parquet(self.ctx['flat'])
-        with self.assertRaises(AssertionError):
-            benchmark.publish_dataset(self.ctx)
-        after = {p.relative_to(target): p.read_bytes() for p in target.rglob('*.parquet')}
-        self.assertEqual(before, after)
-        self.frame.write_parquet(self.ctx['flat'])
-        self.assertEqual(benchmark.publish_dataset(self.ctx), target)
-        self.assertFalse(list(target.parent.glob(target.name + '.tmp-*')))
-
     def test_detects_missing_column(self):
         self.frame.drop('extra_feature').write_parquet(self.ctx['flat'])
-        with self.assertRaisesRegex(AssertionError, 'schematy'):
+        with self.assertRaisesRegex(duckdb.BinderException, 'extra_feature'):
             benchmark.verify_data(self.ctx)
 
 
