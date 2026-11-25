@@ -3,6 +3,7 @@ import sys
 
 import nbformat
 from nbclient import NotebookClient
+from jupyter_client import KernelManager
 
 
 def main():
@@ -36,10 +37,12 @@ def main():
         notebook = None
         try:
             notebook = nbformat.read(path, as_version=4)
+            manager = KernelManager(kernel_name="python3")
+            manager.kernel_spec.argv = [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
             client = NotebookClient(
                 notebook,
                 timeout=None,
-                kernel_name="python3",
+                km=manager,
                 allow_errors=False,
                 resources={"metadata": {"path": str(folder)}},
             )
