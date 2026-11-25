@@ -262,7 +262,7 @@ def import_source(session, source):
 
         logger.info(
             "Zapisano: %s | %.2f MB",
-            target,
+            target.relative_to(ROOT).as_posix() if target.is_relative_to(ROOT) else target.name,
             size_bytes / 1_000_000,
         )
 
