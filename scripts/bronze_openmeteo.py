@@ -1,12 +1,14 @@
 import json
-from pathlib import Path
 
 import polars as pl
 
 
-ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = ROOT / "data" / "raw" / "openmeteo" / "2024"
-BRONZE_PATH = ROOT / "data" / "bronze" / "openmeteo_2024.parquet"
+try:
+    from .pipeline_config import ROOT, RAW_DIR, BRONZE_DIR, YEARS, PERIOD
+except ImportError:
+    from pipeline_config import ROOT, RAW_DIR, BRONZE_DIR, YEARS, PERIOD
+
+BRONZE_PATH = BRONZE_DIR / f"openmeteo_{PERIOD}.parquet"
 
 WEATHER_COLUMNS = [
     "temperature_2m",
@@ -35,11 +37,16 @@ def json_to_bronze(path):
 
 
 def weather_files():
-    return sorted(
-        path
-        for path in RAW_DIR.glob("*.json")
-        if not path.name.endswith(".metadata.json")
-    )
+    try:
+        from .download_openmeteo import pm25_station_codes
+    except ImportError:
+        from download_openmeteo import pm25_station_codes
+    codes = sorted(set().union(*(pm25_station_codes(year) for year in YEARS)))
+    paths = [RAW_DIR / "openmeteo" / str(year) / f"{code}.json" for year in YEARS for code in codes]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Brak pogody; uruchom notebook 01: {missing}")
+    return paths
 
 
 def main():
@@ -58,7 +65,7 @@ def main():
     print(f"Pliki JSON: {len(paths)}")
     print("RAZEM:", weather.shape)
     print(
-        f"Zapisano: {BRONZE_PATH} "
+        f"Zapisano: {BRONZE_PATH.relative_to(ROOT).as_posix()} "
         f"({BRONZE_PATH.stat().st_size / 1_000_000:.1f} MB)"
     )
 

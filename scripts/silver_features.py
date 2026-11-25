@@ -1,22 +1,22 @@
 import math
 from datetime import date
-from pathlib import Path
 
 import polars as pl
 
 
-ROOT = Path(__file__).resolve().parents[1]
-BRONZE_DIR = ROOT / "data" / "bronze"
-SILVER_DIR = ROOT / "data" / "silver"
+try:
+    from .pipeline_config import BRONZE_DIR, SILVER_DIR, PERIOD, EXTRA_STATIONS
+except ImportError:
+    from pipeline_config import BRONZE_DIR, SILVER_DIR, PERIOD, EXTRA_STATIONS
 
-# Dni ustawowo wolne w 2024 r. (Wigilia jest wolna dopiero od 2025 r.).
-HOLIDAYS = [
-    date(2024, 1, 1), date(2024, 1, 6), date(2024, 3, 31), date(2024, 4, 1),
-    date(2024, 5, 1), date(2024, 5, 3), date(2024, 5, 19), date(2024, 5, 30),
-    date(2024, 8, 15), date(2024, 11, 1), date(2024, 11, 11),
-    date(2024, 12, 25), date(2024, 12, 26),
-    date(2025, 1, 1),  # Ostatnia godzina 2024 UTC to już Nowy Rok w Polsce.
-]
+# Kalendarz dla zakresu projektu; 1 stycznia kolejnego roku jest potrzebny w czasie lokalnym.
+HOLIDAYS = [date(y, m, d) for y in [2023, 2024, 2025, 2026]
+            for m, d in [(1, 1), (1, 6), (5, 1), (5, 3), (8, 15), (11, 1), (11, 11), (12, 25), (12, 26)]]
+HOLIDAYS += [date.fromisoformat(d) for d in [
+    "2023-04-09", "2023-04-10", "2023-05-28", "2023-06-08",
+    "2024-03-31", "2024-04-01", "2024-05-19", "2024-05-30",
+    "2025-04-20", "2025-04-21", "2025-06-08", "2025-06-19", "2025-12-24",
+]]
 
 PM25_LAGS = [1, 2, 3, 24, 168]
 PM25_WINDOWS = [3, 6, 24]
@@ -34,6 +34,7 @@ def build_base(measurements, weather, stations):
         .filter((pl.col("wskaznik") == "PM2.5") & (pl.col("czas_usredniania") == "1g"))
         .select("kod_stacji", "data_czas_utc", pl.col("wartosc").alias("pm25"))
     )
+    stations = pl.concat([stations, pl.DataFrame(EXTRA_STATIONS)], how="diagonal_relaxed")
     stations = (
         stations
         .with_columns(pl.col("kod_stacji").str.strip_chars())
@@ -133,13 +134,28 @@ def add_features(base):
     return base.with_columns(*calendar_features(), *pm25_features(), *weather_features())
 
 
+def coverage_report(features):
+    return (features.group_by("kod_stacji", pl.col("data_czas_utc").dt.year().alias("rok"))
+            .agg(pl.len().alias("godziny"), pl.col("pm25").count().alias("pomiary_pm25"))
+            .with_columns((100 * pl.col("pomiary_pm25") / pl.col("godziny")).round(2).alias("pokrycie_proc"))
+            .sort("kod_stacji", "rok"))
+
+
+def save_features(features):
+    SILVER_DIR.mkdir(parents=True, exist_ok=True)
+    features.write_parquet(SILVER_DIR / f"pm25_pogoda_{PERIOD}.parquet")
+    # Wycinek dopiero po obliczeniu cech, z historią grudnia 2023.
+    features.filter(pl.col("data_czas_utc").dt.year() == 2024).write_parquet(SILVER_DIR / "pm25_pogoda_2024.parquet")
+    coverage_report(features).write_csv(SILVER_DIR / f"pokrycie_{PERIOD}.csv")
+
+
 def main():
-    measurements = pl.read_parquet(SILVER_DIR / "pomiary_2024.parquet")
-    weather = pl.read_parquet(SILVER_DIR / "openmeteo_2024.parquet")
+    measurements = pl.read_parquet(SILVER_DIR / f"pomiary_{PERIOD}.parquet")
+    weather = pl.read_parquet(SILVER_DIR / f"openmeteo_{PERIOD}.parquet")
     stations = pl.read_parquet(BRONZE_DIR / "stacje.parquet")
 
     features = add_features(build_base(measurements, weather, stations))
-    features.write_parquet(SILVER_DIR / "pm25_pogoda_2024.parquet")
+    save_features(features)
 
     print("Cechy:", features.shape)
     return features

@@ -2,6 +2,10 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
+import json
+
+from scripts import silver_clean, bronze_gios, download_openmeteo
 
 import polars as pl
 import duckdb
@@ -30,6 +34,78 @@ class FeaturesTests(unittest.TestCase):
                             "pm25": [10., None, 30., 100., 200., 300.]})
         result = base.with_columns(*features.pm25_features())
         self.assertEqual(result["pm25_lag1"].to_list(), [None, 10., None, None, 100., 200.])
+
+
+class MultiYearTests(unittest.TestCase):
+    def test_calendar_all_years_and_christmas_eve(self):
+        days = [datetime(2023, 4, 10, 12), datetime(2024, 4, 1, 12),
+                datetime(2025, 4, 21, 12), datetime(2024, 12, 24, 12),
+                datetime(2025, 12, 24, 12), datetime(2025, 12, 31, 23)]
+        result = pl.DataFrame({"data_czas_utc": days}).with_columns(*features.calendar_features())
+        self.assertEqual(result["swieto"].to_list(), [True, True, True, False, True, True])
+
+    def test_lag_crosses_year_and_preserves_missing_station_year(self):
+        base = pl.DataFrame({"kod_stacji": ["A"] * 3 + ["B"] * 3,
+            "data_czas_utc": [datetime(2023, 12, 31, 23), datetime(2024, 1, 1), datetime(2024, 1, 1, 1)] * 2,
+            "pm25": [10., 20., 30., None, None, 50.]})
+        result = base.with_columns(*features.pm25_features())
+        self.assertEqual(result['pm25_lag1'].to_list(), [None, 10., 20., None, None, None])
+        report = features.coverage_report(result)
+        self.assertEqual(report.filter((pl.col('kod_stacji') == 'B') & (pl.col('rok') == 2023))['pomiary_pm25'].item(), 0)
+
+    def test_benchmark_slice_keeps_december_history(self):
+        base = pl.DataFrame({"kod_stacji": ["A"] * 3,
+            "data_czas_utc": [datetime(2023, 12, 31, 23), datetime(2024, 1, 1), datetime(2025, 1, 1)],
+            "pm25": [10., 20., 30.]})
+        frame = base.with_columns(*features.pm25_features())
+        with tempfile.TemporaryDirectory() as tmp, patch.object(features, 'SILVER_DIR', Path(tmp)):
+            features.save_features(frame)
+            subset = pl.read_parquet(Path(tmp) / 'pm25_pogoda_2024.parquet')
+            self.assertEqual(subset.height, 1)
+            self.assertEqual(subset['pm25_lag1'].item(), 10.)
+            self.assertTrue((Path(tmp) / 'pm25_pogoda_2023_2025.parquet').exists())
+
+    def test_weather_requires_complete_ordered_year(self):
+        year = 2024
+        hours = [datetime(year, 1, 1) + timedelta(hours=h) for h in range(8784)]
+        hourly = {name: [1.] * len(hours) for name in download_openmeteo.HOURLY}
+        hourly['time'] = [d.strftime('%Y-%m-%dT%H:%M') for d in hours]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'station.json'
+            path.write_text(json.dumps({'hourly': hourly}), encoding='utf-8')
+            self.assertIsNone(download_openmeteo.weather_error(path, year))
+            hourly['time'][1] = hourly['time'][0]
+            path.write_text(json.dumps({'hourly': hourly}), encoding='utf-8')
+            self.assertIsNotNone(download_openmeteo.weather_error(path, year))
+
+    def test_bronze_extra_header_and_fractional_seconds(self):
+        class Archive:
+            def read(self, name): return b'fixture'
+        for extra in [False, True]:
+            labels = ['Nr', 'Kod stacji', 'Wskaźnik', 'Czas uśredniania', 'Jednostka', 'Kod stanowiska']
+            values = ['1', 'A', 'PM2.5', '1g', 'ug/m3', 'A-PM25-1g']
+            if extra:
+                labels.append('Czas pomiaru')
+                values.insert(5, '2023')
+            raw = pl.DataFrame({'column_0': labels + ['2025-01-01 03:00:00.005'],
+                                'column_1': values + ['12.5']})
+            with patch.object(bronze_gios.pl, 'read_excel', return_value=raw):
+                frame = bronze_gios.xlsx_to_bronze(Archive(), 'fixture.xlsx')
+            self.assertEqual(frame['kod_stanowiska'].item(), 'A-PM25-1g')
+            self.assertEqual(frame['data_czas'].item().microsecond, 5000)
+            clean = silver_clean.clean_measurements(silver_clean.flag_measurements(frame))
+            self.assertEqual(clean['data_czas_utc'].item(), datetime(2025, 1, 1, 1))
+
+    def test_stale_run_does_not_cross_missing_year(self):
+        times = [datetime(2023, 12, 31, 18) + timedelta(hours=h) for h in range(6)]
+        times += [datetime(2025, 1, 1) + timedelta(hours=h) for h in range(6)]
+        frame = pl.DataFrame({'kod_stacji': ['A'] * 12, 'kod_stanowiska': ['A-PM25'] * 12,
+            'wskaznik': ['PM2.5'] * 12, 'czas_usredniania': ['1g'] * 12,
+            'data_czas': times, 'wartosc': [20.] * 12})
+        result = silver_clean.flag_measurements(frame)
+        self.assertEqual(result['powod_usuniecia'].null_count(), 12)
+        frame = frame.with_columns(pl.Series('data_czas', [times[0] + timedelta(hours=h) for h in range(12)]))
+        self.assertEqual(silver_clean.flag_measurements(frame)['powod_usuniecia'].unique().to_list(), ['PM2.5 stałe >= 12 h'])
 
 
 class StorageTests(unittest.TestCase):

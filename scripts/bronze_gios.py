@@ -1,4 +1,12 @@
+import zipfile
+
 import polars as pl
+
+try:
+    from .pipeline_config import ROOT, RAW_DIR, BRONZE_DIR, YEARS, PERIOD
+except ImportError:
+    from pipeline_config import ROOT, RAW_DIR, BRONZE_DIR, YEARS, PERIOD
+
 
 def xlsx_to_bronze(archive, name):
     raw = pl.read_excel(
@@ -6,8 +14,10 @@ def xlsx_to_bronze(archive, name):
         has_header=False,
         infer_schema_length=0,
     )
-    header = raw.head(6)
-    data = raw.slice(6)
+    # NO2 2023 ma dodatkowy wiersz z rokiem przed kodami stanowisk.
+    extra_year = raw["column_0"][6] == "Czas pomiaru"
+    header = pl.concat([raw.head(5), raw.slice(6, 1)]) if extra_year else raw.head(6)
+    data = raw.slice(7 if extra_year else 6)
 
     columns_info = (
         header
@@ -32,7 +42,7 @@ def xlsx_to_bronze(archive, name):
         'wskaznik',
         'czas_usredniania',
         'jednostka',
-        pl.col('data_czas').str.to_datetime('%Y-%m-%d %H:%M:%S'),
+        pl.col('data_czas').str.to_datetime('%Y-%m-%d %H:%M:%S%.f'),
         pl.col('wartosc').cast(pl.Float64),
         pl.lit(name).alias('plik_zrodlowy'),
     )
@@ -85,3 +95,34 @@ def positions_to_bronze(path):
         pl.col('Województwo').alias('wojewodztwo'),
         pl.col('Nazwa strefy').alias('strefa'),
     )
+
+
+
+def main():
+    BRONZE_DIR.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for year in YEARS:
+        with zipfile.ZipFile(RAW_DIR / str(year) / f"pomiary_{year}.zip") as archive:
+            parts = []
+            for name in archive.namelist():
+                if not name.endswith(".xlsx") or "_Depozycja_" in name:
+                    continue
+                part = xlsx_to_bronze(archive, name)
+                print(name, part.height, flush=True)
+                parts.append(part)
+            frame = pl.concat(parts)
+        path = BRONZE_DIR / f"pomiary_{year}.parquet"
+        frame.write_parquet(path)
+        paths.append(path)
+        del parts, frame
+    target = BRONZE_DIR / f"pomiary_{PERIOD}.parquet"
+    pl.scan_parquet(paths).sink_parquet(target)
+    metadata = RAW_DIR / "stacje/metadane_stacji.xlsx"
+    stations_to_bronze(metadata).write_parquet(BRONZE_DIR / "stacje.parquet")
+    positions_to_bronze(metadata).write_parquet(BRONZE_DIR / "stanowiska.parquet")
+    print("Zapisano:", target.relative_to(ROOT).as_posix())
+    return target
+
+
+if __name__ == "__main__":
+    main()

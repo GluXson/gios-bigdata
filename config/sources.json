@@ -1,9 +1,19 @@
 {
   "sources": [
     {
+      "year": 2023,
+      "url": "https://powietrze.gios.gov.pl/pjp/archives/downloadFile/564",
+      "filename": "pomiary_2023.zip"
+    },
+    {
       "year": 2024,
       "url": "https://powietrze.gios.gov.pl/pjp/archives/downloadFile/582",
       "filename": "pomiary_2024.zip"
+    },
+    {
+      "year": 2025,
+      "url": "https://powietrze.gios.gov.pl/pjp/archives/downloadFile/644",
+      "filename": "pomiary_2025.zip"
     },
     {
       "dataset": "stacje",
