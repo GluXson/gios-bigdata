@@ -15,6 +15,7 @@ HOURS = int((END - START).total_seconds() / 3600)
 RAW_DIR = ROOT / "data/raw"
 BRONZE_DIR = ROOT / "data/bronze"
 SILVER_DIR = ROOT / "data/silver"
+GOLD_DIR = ROOT / "data/gold"
 
 # Różne kody tej samej lokalizacji w pomiarach i słowniku GIOŚ.
 STATION_CODES = {
